@@ -1,3 +1,5 @@
+import { sevenProducts, sevenInventory } from './seven.js';
+
 const UPSTREAM = 'https://mcp.aka.page';
 const EMART_WEB = 'https://emart24.co.kr';
 const EMART_EVERSE = 'https://everse.emart24.co.kr';
@@ -309,6 +311,32 @@ async function directEmartInventory(url) {
   }
 }
 
+async function directSevenProducts(url) {
+  const query = url.searchParams.get('query') || url.searchParams.get('keyword') || '';
+  const size = Number(url.searchParams.get('size') || 40);
+  if (!query.trim()) return json({ error: { message: 'query required' } }, 400);
+  try {
+    const products = await sevenProducts(query, size);
+    return json({ ok: true, source: 'direct-seveneleven', data: { products } });
+  } catch (e) {
+    return json({ error: { message: `세븐일레븐 상품조회 실패: ${e.message || e}` } }, 502);
+  }
+}
+
+async function directSevenInventory(url) {
+  const keyword = url.searchParams.get('keyword') || '';
+  const lat = Number(url.searchParams.get('lat'));
+  const lng = Number(url.searchParams.get('lng'));
+  const storeLimit = Number(url.searchParams.get('storeLimit') || 30);
+  if (!keyword.trim()) return json({ error: { message: 'keyword required' } }, 400);
+  try {
+    const result = await sevenInventory(keyword, lat, lng, storeLimit);
+    return json({ ok: true, source: 'direct-seveneleven', data: { inventory: { stores: result.stores }, product: result.product, stores: result.stores } });
+  } catch (e) {
+    return json({ error: { message: `세븐일레븐 재고조회 실패: ${e.message || e}` } }, 502);
+  }
+}
+
 export default {
   async fetch(request) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
@@ -316,11 +344,13 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/' || url.pathname === '/health') {
-      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.3.3', frontendReady: true, emart24: 'direct+relay-fallback' });
+      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.4.0', frontendReady: true, emart24: 'direct+relay-fallback', seveneleven: 'direct' });
     }
     if (url.pathname === '/api/emart24/products') return directEmartProducts(url);
     if (url.pathname === '/api/emart24/inventory') return directEmartInventory(url);
-    if (/^\/api\/(gs25|cu|seveneleven)\//.test(url.pathname)) return relay(request.url, url.pathname);
+    if (url.pathname === '/api/seveneleven/products') return directSevenProducts(url);
+    if (url.pathname === '/api/seveneleven/inventory') return directSevenInventory(url);
+    if (/^\/api\/(gs25|cu)\//.test(url.pathname)) return relay(request.url, url.pathname);
     return json({ error: { message: 'not found' } }, 404);
   }
 };
