@@ -1,5 +1,5 @@
 name = "pokemon-stock-radar-api"
-main = "backend/worker.js"
+main = "backend/worker-v2.js"
 compatibility_date = "2026-10-14"
 
 [vars]
