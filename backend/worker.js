@@ -19,6 +19,15 @@ function json(data, status = 200) {
   });
 }
 
+function shortError(e, fallback = '요청 실패') {
+  const status = Number(e?.status || 0);
+  const raw = String(e?.message || e || '');
+  if (status === 403 || /HTTP\s*403/i.test(raw)) return '이마트24 접근 차단(403)';
+  if (status === 429 || /HTTP\s*429/i.test(raw)) return '이마트24 요청 제한(429)';
+  if (/<!doctype|<html|<head|<body/i.test(raw)) return fallback;
+  return raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140) || fallback;
+}
+
 async function readJson(url, init = {}) {
   const r = await fetch(url, init);
   const text = await r.text();
@@ -51,6 +60,21 @@ async function relay(requestUrl, targetPath) {
       'x-radar-upstream-status': String(r.status),
     },
   });
+}
+
+async function relayJson(requestUrl, targetPath) {
+  const incoming = new URL(requestUrl);
+  const target = new URL(UPSTREAM + targetPath);
+  for (const [k, v] of incoming.searchParams.entries()) target.searchParams.append(k, v);
+  const r = await fetch(target.toString(), {
+    method: 'GET',
+    headers: { accept: 'application/json' },
+    cf: { cacheTtl: 0, cacheEverything: false },
+  });
+  const text = await r.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = null; }
+  return { ok: r.ok, status: r.status, body };
 }
 
 function emartJsonHeaders(cookie = '') {
@@ -119,9 +143,10 @@ async function reverseArea(lat, lng) {
     u.searchParams.set('addressdetails', '1');
     const d = await readJson(u.toString(), { headers: { 'User-Agent': 'pokemon-stock-radar/1.0', Accept: 'application/json' } });
     const a = d.address || {};
-    const area1 = normalizeArea1(a.city || a.state || a.province || '');
-    const area2 = a.borough || a.city_district || a.county || a.town || '';
-    return { area1, area2 };
+    return {
+      area1: normalizeArea1(a.city || a.state || a.province || ''),
+      area2: a.borough || a.city_district || a.county || a.town || '',
+    };
   } catch {
     return { area1: '', area2: '' };
   }
@@ -157,10 +182,7 @@ async function emartProducts(keyword, page = 1, pageSize = 50) {
   });
   const body = await emartReadJson(`${EMART_EVERSE}/stock/stock/search`, {
     method: 'POST',
-    headers: {
-      ...emartJsonHeaders(),
-      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-    },
+    headers: { ...emartJsonHeaders(), 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
     body: form.toString(),
     cf: { cacheTtl: 0, cacheEverything: false },
   });
@@ -192,33 +214,30 @@ async function emartStores(lat, lng, storeLimit = 30) {
         u.searchParams.set('page', String(page));
         for (const [k,v] of Object.entries(filters)) if (v) u.searchParams.set(k, v);
         const body = await emartReadJson(u.toString(), { headers: { ...emartJsonHeaders(), Origin: EMART_WEB, Referer: `${EMART_WEB}/store` } });
-        const source = Array.isArray(body.data) ? body.data : [];
-        const batch = source.map(emartStore).filter(s => s.storeCode);
+        const batch = (Array.isArray(body.data) ? body.data : []).map(emartStore).filter(s => s.storeCode);
         found.push(...batch);
         if (!batch.length || found.length >= 120) break;
       }
       if (found.length) { stores = found; break; }
-    } catch (e) { lastErr = e.message || String(e); }
+    } catch (e) { lastErr = shortError(e, '이마트24 매장조회 실패'); }
   }
   if (!stores.length && lastErr) throw new Error(lastErr);
 
   const uniq = new Map();
   for (const s of stores) if (!uniq.has(s.storeCode)) uniq.set(s.storeCode, s);
-  const list = [...uniq.values()].map(s => ({
+  return [...uniq.values()].map(s => ({
     ...s,
     distanceM: s.latitude && s.longitude && Number.isFinite(lat) && Number.isFinite(lng)
       ? distanceM(lat, lng, s.latitude, s.longitude) : null,
-  })).sort((a,b) => (a.distanceM ?? 1e12) - (b.distanceM ?? 1e12));
-  return list.slice(0, Math.max(1, Math.min(60, storeLimit)));
+  })).sort((a,b) => (a.distanceM ?? 1e12) - (b.distanceM ?? 1e12))
+    .slice(0, Math.max(1, Math.min(60, storeLimit)));
 }
 
 function normalizeQtyRows(value) {
   if (Array.isArray(value)) return value;
   if (value == null) return [];
   if (typeof value === 'object') {
-    for (const key of ['data','list','items','rows','storeGoodsQty']) {
-      if (Array.isArray(value[key])) return value[key];
-    }
+    for (const key of ['data','list','items','rows','storeGoodsQty']) if (Array.isArray(value[key])) return value[key];
     return Object.entries(value).flatMap(([key, v]) => {
       if (v && typeof v === 'object') return [{ BIZNO: v.BIZNO ?? v.bizNo ?? key, BIZQTY: v.BIZQTY ?? v.bizQty ?? v.qty ?? null }];
       if (/^\d+$/.test(key)) return [{ BIZNO: key, BIZQTY: v }];
@@ -238,10 +257,17 @@ async function emartStock(pluCd, stores) {
   const qty = new Map(qtyRows.map(x => [
     String(x.BIZNO ?? x.bizNo ?? '').trim(),
     (x.BIZQTY ?? x.bizQty ?? x.qty) === '' || (x.BIZQTY ?? x.bizQty ?? x.qty) == null
-      ? null
-      : Number(x.BIZQTY ?? x.bizQty ?? x.qty)
+      ? null : Number(x.BIZQTY ?? x.bizQty ?? x.qty)
   ]));
   return stores.map(s => ({ ...s, bizNo: s.storeCode, bizQty: qty.has(s.storeCode) ? qty.get(s.storeCode) : null }));
+}
+
+async function fallbackEmart(url, path, directError) {
+  try {
+    const out = await relayJson(url.toString(), path);
+    if (out.ok && out.body) return json({ ...out.body, source: 'fallback-relay-emart24' });
+  } catch {}
+  return json({ error: { message: shortError(directError, '이마트24 조회 실패') } }, 502);
 }
 
 async function directEmartProducts(url) {
@@ -253,7 +279,7 @@ async function directEmartProducts(url) {
     const products = await emartProducts(keyword, page, pageSize);
     return json({ ok: true, source: 'direct-emart24', data: { products } });
   } catch (e) {
-    return json({ error: { message: `이마트24 직접 상품조회 실패: ${e.message || e}` } }, 502);
+    return fallbackEmart(url, '/api/emart24/products', e);
   }
 }
 
@@ -276,16 +302,10 @@ async function directEmartInventory(url) {
     return json({
       ok: true,
       source: 'direct-emart24',
-      data: {
-        keyword,
-        pluCd,
-        productCandidates,
-        nearbyStores: { totalCount: nearby.length, stores: nearby },
-        stores,
-      },
+      data: { keyword, pluCd, productCandidates, nearbyStores: { totalCount: nearby.length, stores: nearby }, stores },
     });
   } catch (e) {
-    return json({ error: { message: `이마트24 직접 재고조회 실패: ${e.message || e}` } }, 502);
+    return fallbackEmart(url, '/api/emart24/inventory', e);
   }
 }
 
@@ -296,16 +316,11 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/' || url.pathname === '/health') {
-      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.3.2', frontendReady: true, emart24: 'direct-session-retry' });
+      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.3.3', frontendReady: true, emart24: 'direct+relay-fallback' });
     }
-
     if (url.pathname === '/api/emart24/products') return directEmartProducts(url);
     if (url.pathname === '/api/emart24/inventory') return directEmartInventory(url);
-
-    if (/^\/api\/(gs25|cu|seveneleven)\//.test(url.pathname)) {
-      return relay(request.url, url.pathname);
-    }
-
+    if (/^\/api\/(gs25|cu|seveneleven)\//.test(url.pathname)) return relay(request.url, url.pathname);
     return json({ error: { message: 'not found' } }, 404);
   }
 };
