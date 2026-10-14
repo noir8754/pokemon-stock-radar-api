@@ -16,19 +16,41 @@ function json(data, status = 200) {
   });
 }
 
+async function relay(requestUrl, targetPath) {
+  const incoming = new URL(requestUrl);
+  const target = new URL(UPSTREAM + targetPath);
+  for (const [k, v] of incoming.searchParams.entries()) target.searchParams.append(k, v);
+
+  const r = await fetch(target.toString(), {
+    method: 'GET',
+    headers: { accept: 'application/json' },
+    cf: { cacheTtl: 0, cacheEverything: false },
+  });
+
+  const text = await r.text();
+  return new Response(text, {
+    status: r.status,
+    headers: {
+      'content-type': r.headers.get('content-type') || 'application/json; charset=utf-8',
+      ...cors(),
+      'x-radar-upstream-status': String(r.status),
+    },
+  });
+}
+
 async function proxyToMcp(path, params) {
   const url = new URL(UPSTREAM + path);
   for (const [k, v] of params.entries()) {
     if (v !== '') url.searchParams.set(k, v);
   }
-  const r = await fetch(url.toString(), { headers: { 'accept': 'application/json' } });
+  const r = await fetch(url.toString(), { headers: { accept: 'application/json' } });
   const text = await r.text();
   let body;
   try { body = JSON.parse(text); } catch { body = { raw: text }; }
   return { ok: r.ok, status: r.status, body };
 }
 
-async function handleInventory(url, env) {
+async function handleInventory(url) {
   const brand = (url.searchParams.get('brand') || '').toUpperCase();
   const keyword = url.searchParams.get('keyword') || '';
   const lat = url.searchParams.get('lat') || '';
@@ -84,7 +106,7 @@ async function handleInventory(url, env) {
     upstreamStatus: out.status,
     ok: out.ok,
     data: out.body,
-    note: out.ok ? undefined : '현재는 공개 중계 API 결과를 그대로 전달합니다. 이후 브랜드별 직접 연결을 이 Worker에 붙입니다.'
+    note: out.ok ? undefined : '현재 공개 중계 API 상태를 전달했습니다.'
   }, out.ok ? 200 : 502);
 }
 
@@ -106,16 +128,31 @@ async function handleProducts(url) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
     if (request.method !== 'GET') return json({ error: 'GET only' }, 405);
 
     const url = new URL(request.url);
+
     if (url.pathname === '/' || url.pathname === '/health') {
-      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.1.0' });
+      return json({
+        ok: true,
+        service: 'pokemon-stock-radar-backend',
+        version: '0.2.0',
+        upstream: UPSTREAM,
+        frontendReady: true
+      });
     }
+
     if (url.pathname === '/api/products') return handleProducts(url);
-    if (url.pathname === '/api/inventory') return handleInventory(url, env);
+    if (url.pathname === '/api/inventory') return handleInventory(url);
+
+    // Frontend compatibility: keep the same paths it already uses,
+    // but route every request through our own Cloudflare Worker first.
+    if (/^\/api\/(gs25|emart24|cu|seveneleven)\//.test(url.pathname)) {
+      return relay(request.url, url.pathname);
+    }
+
     return json({ error: 'not found' }, 404);
   }
 };
