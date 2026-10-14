@@ -1,6 +1,7 @@
 const UPSTREAM = 'https://mcp.aka.page';
 const EMART_WEB = 'https://emart24.co.kr';
 const EMART_EVERSE = 'https://everse.emart24.co.kr';
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
 
 function cors() {
   return {
@@ -25,7 +26,9 @@ async function readJson(url, init = {}) {
   try { body = JSON.parse(text); } catch { body = { raw: text }; }
   if (!r.ok) {
     const msg = body?.error?.message || body?.message || text.slice(0, 180) || `HTTP ${r.status}`;
-    throw new Error(`HTTP ${r.status} · ${msg}`);
+    const err = new Error(`HTTP ${r.status} · ${msg}`);
+    err.status = r.status;
+    throw err;
   }
   return body;
 }
@@ -50,12 +53,48 @@ async function relay(requestUrl, targetPath) {
   });
 }
 
-function emartJsonHeaders() {
-  return {
+function emartJsonHeaders(cookie = '') {
+  const h = {
     Accept: 'application/json, text/javascript, */*; q=0.01',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+    'User-Agent': BROWSER_UA,
     'X-Requested-With': 'XMLHttpRequest',
-    Referer: 'https://emart24.co.kr/',
+    Origin: EMART_EVERSE,
+    Referer: `${EMART_EVERSE}/stock`,
   };
+  if (cookie) h.Cookie = cookie;
+  return h;
+}
+
+async function emartSessionCookie() {
+  try {
+    const r = await fetch(`${EMART_EVERSE}/stock`, {
+      method: 'GET',
+      headers: {
+        'User-Agent': BROWSER_UA,
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      redirect: 'follow',
+      cf: { cacheTtl: 0, cacheEverything: false },
+    });
+    const raw = r.headers.get('set-cookie') || '';
+    return raw.split(',').map(v => v.split(';')[0].trim()).filter(Boolean).join('; ');
+  } catch {
+    return '';
+  }
+}
+
+async function emartReadJson(url, init = {}) {
+  try {
+    return await readJson(url, init);
+  } catch (e) {
+    if (e?.status !== 403) throw e;
+    const cookie = await emartSessionCookie();
+    const headers = { ...(init.headers || {}), ...emartJsonHeaders(cookie) };
+    if ((init.method || 'GET').toUpperCase() === 'POST') headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+    return readJson(url, { ...init, headers, cf: { cacheTtl: 0, cacheEverything: false } });
+  }
 }
 
 function normalizeArea1(v = '') {
@@ -116,14 +155,14 @@ async function emartProducts(keyword, page = 1, pageSize = 50) {
     saleProductYn: 'N',
     searchWord: keyword.trim(),
   });
-  const body = await readJson(`${EMART_EVERSE}/stock/stock/search`, {
+  const body = await emartReadJson(`${EMART_EVERSE}/stock/stock/search`, {
     method: 'POST',
     headers: {
       ...emartJsonHeaders(),
       'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      Referer: `${EMART_EVERSE}/stock`,
     },
     body: form.toString(),
+    cf: { cacheTtl: 0, cacheEverything: false },
   });
   const rows = Array.isArray(body.productList) ? body.productList : [];
   return rows.map(x => ({
@@ -152,7 +191,7 @@ async function emartStores(lat, lng, storeLimit = 30) {
         const u = new URL('/api1/store', EMART_WEB);
         u.searchParams.set('page', String(page));
         for (const [k,v] of Object.entries(filters)) if (v) u.searchParams.set(k, v);
-        const body = await readJson(u.toString(), { headers: emartJsonHeaders() });
+        const body = await emartReadJson(u.toString(), { headers: { ...emartJsonHeaders(), Origin: EMART_WEB, Referer: `${EMART_WEB}/store` } });
         const source = Array.isArray(body.data) ? body.data : [];
         const batch = source.map(emartStore).filter(s => s.storeCode);
         found.push(...batch);
@@ -177,7 +216,6 @@ function normalizeQtyRows(value) {
   if (Array.isArray(value)) return value;
   if (value == null) return [];
   if (typeof value === 'object') {
-    // Some live responses wrap the array one level deeper or return an object keyed by store code.
     for (const key of ['data','list','items','rows','storeGoodsQty']) {
       if (Array.isArray(value[key])) return value[key];
     }
@@ -195,7 +233,7 @@ async function emartStock(pluCd, stores) {
   const u = new URL('/api/stock/v2/stock-search/store', EMART_EVERSE);
   u.searchParams.set('searchPluCode', pluCd);
   u.searchParams.set('bizNoArr', stores.map(s => s.storeCode).join(','));
-  const body = await readJson(u.toString(), { headers: { ...emartJsonHeaders(), Referer: `${EMART_EVERSE}/stock` } });
+  const body = await emartReadJson(u.toString(), { headers: emartJsonHeaders(), cf: { cacheTtl: 0, cacheEverything: false } });
   const qtyRows = normalizeQtyRows(body.storeGoodsQty);
   const qty = new Map(qtyRows.map(x => [
     String(x.BIZNO ?? x.bizNo ?? '').trim(),
@@ -258,7 +296,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/' || url.pathname === '/health') {
-      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.3.1', frontendReady: true, emart24: 'direct' });
+      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.3.2', frontendReady: true, emart24: 'direct-session-retry' });
     }
 
     if (url.pathname === '/api/emart24/products') return directEmartProducts(url);
