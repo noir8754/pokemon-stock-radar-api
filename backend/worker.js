@@ -125,7 +125,8 @@ async function emartProducts(keyword, page = 1, pageSize = 50) {
     },
     body: form.toString(),
   });
-  return (body.productList || []).map(x => ({
+  const rows = Array.isArray(body.productList) ? body.productList : [];
+  return rows.map(x => ({
     pluCd: String(x.pluCd || ''),
     goodsName: x.goodsNm || '',
     originPrice: Number(x.originPrice || 0),
@@ -152,7 +153,8 @@ async function emartStores(lat, lng, storeLimit = 30) {
         u.searchParams.set('page', String(page));
         for (const [k,v] of Object.entries(filters)) if (v) u.searchParams.set(k, v);
         const body = await readJson(u.toString(), { headers: emartJsonHeaders() });
-        const batch = (body.data || []).map(emartStore).filter(s => s.storeCode);
+        const source = Array.isArray(body.data) ? body.data : [];
+        const batch = source.map(emartStore).filter(s => s.storeCode);
         found.push(...batch);
         if (!batch.length || found.length >= 120) break;
       }
@@ -171,13 +173,36 @@ async function emartStores(lat, lng, storeLimit = 30) {
   return list.slice(0, Math.max(1, Math.min(60, storeLimit)));
 }
 
+function normalizeQtyRows(value) {
+  if (Array.isArray(value)) return value;
+  if (value == null) return [];
+  if (typeof value === 'object') {
+    // Some live responses wrap the array one level deeper or return an object keyed by store code.
+    for (const key of ['data','list','items','rows','storeGoodsQty']) {
+      if (Array.isArray(value[key])) return value[key];
+    }
+    return Object.entries(value).flatMap(([key, v]) => {
+      if (v && typeof v === 'object') return [{ BIZNO: v.BIZNO ?? v.bizNo ?? key, BIZQTY: v.BIZQTY ?? v.bizQty ?? v.qty ?? null }];
+      if (/^\d+$/.test(key)) return [{ BIZNO: key, BIZQTY: v }];
+      return [];
+    });
+  }
+  return [];
+}
+
 async function emartStock(pluCd, stores) {
   if (!stores.length) return [];
   const u = new URL('/api/stock/v2/stock-search/store', EMART_EVERSE);
   u.searchParams.set('searchPluCode', pluCd);
   u.searchParams.set('bizNoArr', stores.map(s => s.storeCode).join(','));
   const body = await readJson(u.toString(), { headers: { ...emartJsonHeaders(), Referer: `${EMART_EVERSE}/stock` } });
-  const qty = new Map((body.storeGoodsQty || []).map(x => [String(x.BIZNO || ''), x.BIZQTY === '' || x.BIZQTY == null ? null : Number(x.BIZQTY)]));
+  const qtyRows = normalizeQtyRows(body.storeGoodsQty);
+  const qty = new Map(qtyRows.map(x => [
+    String(x.BIZNO ?? x.bizNo ?? '').trim(),
+    (x.BIZQTY ?? x.bizQty ?? x.qty) === '' || (x.BIZQTY ?? x.bizQty ?? x.qty) == null
+      ? null
+      : Number(x.BIZQTY ?? x.bizQty ?? x.qty)
+  ]));
   return stores.map(s => ({ ...s, bizNo: s.storeCode, bizQty: qty.has(s.storeCode) ? qty.get(s.storeCode) : null }));
 }
 
@@ -233,7 +258,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/' || url.pathname === '/health') {
-      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.3.0', frontendReady: true, emart24: 'direct' });
+      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.3.1', frontendReady: true, emart24: 'direct' });
     }
 
     if (url.pathname === '/api/emart24/products') return directEmartProducts(url);
