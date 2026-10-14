@@ -311,6 +311,16 @@ async function directEmartInventory(url) {
   }
 }
 
+async function fallbackSeven(url, path, directError) {
+  try {
+    const out = await relayJson(url.toString(), path);
+    if (out.ok && out.body) return json({ ...out.body, source: 'fallback-relay-seveneleven' });
+  } catch {}
+  const raw = String(directError?.message || directError || '');
+  const msg = /403/.test(raw) ? '세븐일레븐 접근 차단(403)' : /429/.test(raw) ? '세븐일레븐 요청 제한(429)' : '세븐일레븐 조회 실패';
+  return json({ error: { message: msg } }, 502);
+}
+
 async function directSevenProducts(url) {
   const query = url.searchParams.get('query') || url.searchParams.get('keyword') || '';
   const size = Number(url.searchParams.get('size') || 40);
@@ -319,7 +329,7 @@ async function directSevenProducts(url) {
     const products = await sevenProducts(query, size);
     return json({ ok: true, source: 'direct-seveneleven', data: { products } });
   } catch (e) {
-    return json({ error: { message: `세븐일레븐 상품조회 실패: ${e.message || e}` } }, 502);
+    return fallbackSeven(url, '/api/seveneleven/products', e);
   }
 }
 
@@ -333,7 +343,7 @@ async function directSevenInventory(url) {
     const result = await sevenInventory(keyword, lat, lng, storeLimit);
     return json({ ok: true, source: 'direct-seveneleven', data: { inventory: { stores: result.stores }, product: result.product, stores: result.stores } });
   } catch (e) {
-    return json({ error: { message: `세븐일레븐 재고조회 실패: ${e.message || e}` } }, 502);
+    return fallbackSeven(url, '/api/seveneleven/inventory', e);
   }
 }
 
@@ -344,7 +354,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/' || url.pathname === '/health') {
-      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.4.0', frontendReady: true, emart24: 'direct+relay-fallback', seveneleven: 'direct' });
+      return json({ ok: true, service: 'pokemon-stock-radar-backend', version: '0.4.1', frontendReady: true, emart24: 'direct+relay-fallback', seveneleven: 'direct+relay-fallback' });
     }
     if (url.pathname === '/api/emart24/products') return directEmartProducts(url);
     if (url.pathname === '/api/emart24/inventory') return directEmartInventory(url);
